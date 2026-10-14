@@ -1,10 +1,8 @@
-
-
-from pathlib import Path
+from Command_guard.guard.auth.token_lifetime import TokenService
 from typing import Any, Mapping
-
+from Command_guard.hackurity_adapter import HackurityCommandGuard
 from defenses.policy_engine import val_tool_name
-
+import os
 import sys
 from pathlib import Path
 
@@ -18,12 +16,34 @@ from Implement.rules import SecurityConfig, TrustedConfirmation
 from Implement.test import security_proxy
 from Implement.tool_registry import TOOL_HANDLERS
 from defenses.input_validator import val_tool_arg
+import copy
+import json
 
+from Command_guard.guard.hooks import (
+    ALLOW,
+    ASK,
+    BLOCK,
+    SANITIZE,
+    Context,
+    Decision,
+)
+
+from Command_guard.guard.policy_loader import load_policy
+from Command_guard.guard.runtime import GuardRuntime
 
 
 # ============================================================
 # 3. RUNTIME SECURITY GATEWAY
 # ============================================================
+GUARD_DIR = PROJECT_ROOT / "Command_guard"
+TOKEN_SERVICE = TokenService.from_env()
+GUARD_POLICY_PATH = GUARD_DIR / "policy" / "policy.yaml"
+
+COMMAND_GUARD = GuardRuntime(
+    policy=load_policy(GUARD_POLICY_PATH),
+    audit_path=PROJECT_ROOT / "logs" / "guard-audit.jsonl",
+    token_service=TOKEN_SERVICE,
+)
 
 def execute_tool_call(
     *,
@@ -31,6 +51,8 @@ def execute_tool_call(
     arguments: Mapping[str, Any],
     config: SecurityConfig,
     authenticated_user_id: str | None,
+    access_token: str | None = None,
+    token_service: TokenService | None = None,
     authorized_user_ids: frozenset[str],
     resource_is_authorized: bool,
     confirmation: TrustedConfirmation | None = None,
@@ -53,12 +75,57 @@ def execute_tool_call(
             "reason": str(exc),
             "output": None,
         }
+    
+    # Stage 0.5: Command Guard inspection.
+    try:
+        guarded_arguments = dict(arguments)
 
+        
+        
+        guard = HackurityCommandGuard(
+            policy_path=GUARD_POLICY_PATH,
+            audit_path=PROJECT_ROOT / "logs" / "guard-audit.jsonl",
+            token_service=token_service or TOKEN_SERVICE,
+            allowed_roots=[config.allowed_root],
+        )
+        
+        decision, guarded_arguments, guard_ctx = guard.check_request(
+            tool_name=tool_name,
+            arguments=arguments,
+            principal=authenticated_user_id,
+            access_token=access_token,  
+            server_name="filesystem",
+        )
 
+        if decision.action not in (ALLOW, SANITIZE):
+            return {
+                "ok": False,
+                "blocked": True,
+                "reason": decision.reason or "Command Guard denied the request.",
+                "output": None,
+            }
+
+        if not isinstance(guarded_arguments, dict):
+            return {
+                "ok": False,
+                "blocked": True,
+                "reason": "Command Guard did not provide valid arguments.",
+                "output": None,
+            }
+
+    except Exception:
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "Command Guard failed; request blocked.",
+            "output": None,
+        }
     # Stage 1: Validate the request BEFORE execution.
+
+
     result = security_proxy(
         tool_name=tool_name,
-        arguments=arguments,
+        arguments=guarded_arguments,
         config=config,
         authenticated_user_id=authenticated_user_id,
         authorized_user_ids=authorized_user_ids,
@@ -91,15 +158,10 @@ def execute_tool_call(
         }
 
     # Stage 4: Execute only after authorization succeeds.
-    try:
-        output = handler(result["target"], arguments)
+    
 
-        return {
-            "ok": True,
-            "blocked": False,
-            "reason": "Authorized tool executed successfully.",
-            "output": output,
-        }
+    try:
+        output = handler(result["target"], guarded_arguments)
 
     except (OSError, ValueError):
         return {
@@ -108,6 +170,37 @@ def execute_tool_call(
             "reason": "Tool execution failed.",
             "output": None,
         }
+
+    # Stage 5: Inspect output before returning it.
+    try:
+        output_decision = guard.inspect_output(output, guard_ctx)
+
+        if output_decision.action != ALLOW:
+            return {
+                "ok": False,
+                "blocked": True,
+                "reason": (
+                    output_decision.reason
+                    or "Command Guard blocked the tool output."
+                ),
+                "output": None,
+            }
+
+    except Exception:
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "Output inspection failed; output withheld.",
+            "output": None,
+        }
+
+    return {
+        "ok": True,
+        "blocked": False,
+        "reason": "Authorized tool executed and output inspected successfully.",
+        "output": output,
+    }
+
 
 
 # ============================================================

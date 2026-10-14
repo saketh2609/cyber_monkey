@@ -1,0 +1,50 @@
+# Sample policy: only the parts Track B's checks read.
+# t4 / Track D owns the full schema; keep these keys in sync with them.
+defaults:
+  unknown_server: deny
+  on_hook_error: block
+
+servers:
+  filesystem:
+    allowed_tools: [read_file, list_files, write_file, delete_file]
+    allowed_principals: [user_1]
+    tool_roles:
+      delete_file: [admin]
+    
+    allowed_roots:
+     - 'C:\Users\sijas\OneDrive\Desktop\W_H\sandbox'
+    path_args:
+      read_file: [path]
+      list_files: [path]
+      write_file: [path]
+      delete_file: [path]
+
+
+  shell:
+    allowed_tools: [run_command, ping_host, ls, ping, git]
+    allowed_principals: [demo-user]
+    tool_roles:
+      run_command: [operator, admin]
+    allowed_commands:                   # program -> what it may be called with
+      ping:
+        allowed_flags: ["-c"]
+        arg_pattern: "[A-Za-z0-9.\\-]+" # every non-flag argument must fully match this
+      ls:
+        allowed_flags: ["-l", "-a", "-la"]
+    command_fields:                     # tools that build a command from ONE value
+      ping_host:                        #   tool name
+        host:                           #   argument name
+          pattern: "[A-Za-z0-9][A-Za-z0-9.\\-]{0,252}"
+
+checks:
+  path:                                 # every key here is optional
+    max_len: 4096
+    max_decode_layers: 1                # more than 1 layer of %-encoding => PATH-005
+    generic_scan: ask                   # ask | block | off  (suspicious text in non-path fields)
+    sensitive_names: [".ssh", ".env", ".env.*", ".aws", "id_rsa", "*.pem", "*.key"]
+    sensitive_prefixes: ["/etc", "/proc", "/root"]
+  command:
+    max_len: 2048
+    max_args: 64
+    max_decode_layers: 1
+    generic_scan: ask                   # ask | block | off

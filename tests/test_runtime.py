@@ -12,6 +12,33 @@ from defenses.policy_engine import val_tool_name
 
 
 class RuntimeIntegrationTests(unittest.TestCase):
+    
+    def test_write_without_confirmation_blocked(self):
+        result = self.call_tool(
+            "write_file",
+            {"path": "blocked.txt", "content": "should not exist"},
+        )
+
+        self.assertTrue(result["blocked"])
+        self.assertFalse((self.root / "blocked.txt").exists())
+
+    def test_delete_without_confirmation_blocked(self):
+        result = self.call_tool(
+            "delete_file",
+            {"path": "notes.txt"},
+        )
+
+        self.assertTrue(result["blocked"])
+        self.assertTrue((self.root / "notes.txt").exists())
+
+    def test_list_files(self):
+        result = self.call_tool(
+            "list_files",
+            {"path": "."},
+        )
+
+        self.assertTrue(result["ok"], msg=result["reason"])
+        self.assertIn("notes.txt", result["output"])
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

@@ -6,14 +6,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+
 TOOL_SCHEMAS = {
     "read_file": {"path": str},
+    "list_files": {"path": str},
     "write_file": {"path": str, "content": str},
     "delete_file": {"path": str},
-    "query_database": {"query": str, "params": dict},
-    "execute_command": {"command": str, "args": list},
-    "fetch_url": {"url": str},
 }
+
 
 MAX_STRING_LENGTH = 100_000
 MAX_CONTAINER_ITEMS = 1_000
