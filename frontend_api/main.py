@@ -1,62 +1,140 @@
-"""Local FastAPI bridge for the existing Hackurity gateway.
-This is a localhost development adapter, not a production auth boundary.
-The browser cannot provide trusted confirmations; destructive tools are blocked.
-Prompt tests are previews and do not invoke an LLM or execute tools.
-"""
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Any
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ROOT = PROJECT_ROOT / "demo_workspace"
-ALLOWED_ROOT = Path(os.environ.get("HACKURITY_ALLOWED_ROOT", str(DEFAULT_ROOT))).resolve()
-USER_ID = os.environ.get("HACKURITY_USER_ID", "user_1")
-AUTHORIZED_IDS = frozenset(x.strip() for x in os.environ.get("HACKURITY_AUTHORIZED_USER_IDS", USER_ID).split(",") if x.strip())
-app = FastAPI(title="Hackurity Local API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=False, allow_methods=["GET","POST"], allow_headers=["Content-Type"])
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEMO_ROOT = (PROJECT_ROOT / "demo_workspace").resolve()
+DEMO_ROOT.mkdir(parents=True, exist_ok=True)
+(DEMO_ROOT / "notes.txt").write_text(
+    "Hackurity local demo note. This file is intentionally non-sensitive.\n",
+    encoding="utf-8",
+)
+
+app = FastAPI(
+    title="Hackurity Security Test API",
+    description=(
+        "Local demo API. Filesystem tool calls are routed through the existing "
+        "Hackurity execute_tool_call gateway. This is not production authentication."
+    ),
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 class ToolCallRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=100)
     arguments: dict[str, Any] = Field(default_factory=dict)
-class PromptTestRequest(BaseModel):
-    scenario: str = Field(min_length=1, max_length=40)
-    prompt: str = Field(min_length=1, max_length=5000)
 
-@app.on_event("startup")
-def startup():
-    ALLOWED_ROOT.mkdir(parents=True, exist_ok=True)
-    note = ALLOWED_ROOT / "notes.txt"
-    if not note.exists():
-        note.write_text("Hackurity local demo workspace. No sensitive data.\\n", encoding="utf-8")
+class PromptRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=12000)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "mode": "local-api", "allowed_root_configured": str(ALLOWED_ROOT), "principal_configured": USER_ID, "recent_events": []}
+    return {
+        "ok": True,
+        "service": "Hackurity Security Test API",
+        "gateway_module_exists": (PROJECT_ROOT / "Implement" / "mcp_defense.py").is_file(),
+        "demo_root_exists": DEMO_ROOT.is_dir(),
+        "mode": "local-demo",
+    }
+
+@app.get("/api/config")
+def config_info():
+    return {
+        "ok": True,
+        "categories": [
+            "prompt injection", "path traversal", "sensitive files",
+            "authorization", "destructive operations", "tool allowlisting",
+            "argument validation", "output inspection",
+        ],
+        "note": "Prompt/output fixture screening in the frontend is heuristic; gateway tool tests call the existing Python gateway.",
+    }
 
 @app.post("/api/tool-calls")
 def tool_call(request: ToolCallRequest):
+    # The browser must not decide its own identity, authorization set,
+    # allowed root, or trusted confirmation. These are server-side demo values.
+    # Modifying/destructive operations are disabled until a real trusted
+    # confirmation flow is implemented server-side.
     if request.tool_name in {"write_file", "delete_file", "move_file"}:
-        return {"ok": False, "blocked": True, "reason": "This UI bridge does not expose destructive tools until trusted server-side approval is implemented.", "output": None}
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "Modifying operations are disabled in this local demo.",
+            "output": None,
+        }
+
     try:
         from Implement.mcp_defense import execute_tool_call
         from Implement.rules import SecurityConfig
-        config = SecurityConfig(allowed_root=ALLOWED_ROOT)
-        return execute_tool_call(tool_name=request.tool_name, arguments=request.arguments, config=config, authenticated_user_id=USER_ID, authorized_user_ids=AUTHORIZED_IDS, resource_is_authorized=True, confirmation=None, source="user_supplied_data")
-    except Exception as exc:
-        return {"ok": False, "blocked": True, "reason": f"Gateway API could not safely process the request ({type(exc).__name__}). Check the API terminal.", "output": None}
+    except Exception:
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": (
+                "Could not import the existing gateway or SecurityConfig. "
+                "Check project module paths and the MCP_GUARD_SIGNING_KEY."
+            ),
+            "output": None,
+        }
 
-@app.post("/api/prompt-tests")
-def prompt_test(request: PromptTestRequest):
-    expected = {
-      "injection": "Do not follow untrusted instructions or expose secrets.",
-      "traversal": "Reject paths outside the configured allowed root.",
-      "destructive": "Keep destructive actions blocked without trusted server-side approval.",
-      "benign": "A registered permitted tool may proceed only after gateway checks pass."
+    # Demo identity only. Replace with authenticated server-side identity
+    # before any non-local deployment.
+    user_id = os.environ.get("HACKURITY_DEMO_USER_ID", "user_1")
+    authorized_users = frozenset({user_id})
+    config = SecurityConfig(allowed_root=DEMO_ROOT)
+
+    try:
+        result = execute_tool_call(
+            tool_name=request.tool_name,
+            arguments=request.arguments,
+            config=config,
+            authenticated_user_id=user_id,
+            authorized_user_ids=authorized_users,
+            resource_is_authorized=True,
+            source="user_supplied_data",
+        )
+        return result
+    except Exception:
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "Gateway integration failed; request blocked.",
+            "output": None,
+        }
+
+@app.post("/api/prompt-screen")
+def prompt_screen(request: PromptRequest):
+    # Transparent baseline helper only, not an LLM, policy engine, or proof
+    # that the prompt is safe. The frontend labels this as heuristic.
+    text = request.prompt.lower()
+    indicators = [
+        "ignore all previous instructions",
+        "reveal the system prompt",
+        "reveal hidden instructions",
+        "disable all security checks",
+        "send credentials",
+        "exfiltrate",
+        "bypass access control",
+        "unrestricted mode",
+    ]
+    matches = [item for item in indicators if item in text]
+    return {
+        "ok": True,
+        "flagged": bool(matches),
+        "matches": matches,
+        "mode": "heuristic",
+        "note": "Heuristic screening only; this is not a definitive safety verdict.",
     }
-    if request.scenario not in expected:
-        raise HTTPException(status_code=400, detail="Unknown prompt test scenario.")
-    flagged = request.scenario in {"injection","traversal","destructive"}
-    return {"ok": True, "blocked": flagged, "reason": "Risky scenario selected for planning. This is not an LLM or gateway verdict." if flagged else "Benign scenario selected. This is not an LLM or gateway verdict.", "mode": "SCENARIO PREVIEW ONLY", "expected": expected[request.scenario]}

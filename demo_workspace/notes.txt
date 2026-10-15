@@ -1,1 +1,1 @@
-Hackurity local demo workspace. No sensitive data.\n
+Hackurity local demo note. This file is intentionally non-sensitive.
